@@ -1,0 +1,82 @@
+// Prisma schema for Lead Distribution Portal
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum BudgetRange {
+  UNDER_10K
+  BETWEEN_10K_50K
+  GREATER_50K
+}
+
+/// Overall processing status of the lead in our system
+enum LeadStatus {
+  PENDING    // Just created, awaiting HubSpot sync
+  PROCESSING // HubSpot sync in progress
+  SYNCED     // Successfully synced to HubSpot
+  FAILED     // HubSpot sync failed after all retries
+}
+
+/// HubSpot-specific sync outcome (separate from local status for clarity)
+enum HubSpotSyncStatus {
+  PENDING // Not yet attempted
+  SYNCED  // Contact + Company created/updated in HubSpot
+  FAILED  // API call failed
+}
+
+// ─── Models ──────────────────────────────────────────────────────────────────
+
+model Lead {
+  id               String            @id @default(cuid())
+
+  // Personal info
+  firstName        String
+  lastName         String
+  email            String            @unique  // Prevent duplicate submissions
+  companyName      String
+  budgetRange      BudgetRange
+
+  // Local processing status
+  status           LeadStatus        @default(PENDING)
+
+  // HubSpot CRM references (populated after successful sync)
+  hubspotContactId String?
+  hubspotCompanyId String?
+
+  // HubSpot sync outcome tracking
+  hubspotStatus    HubSpotSyncStatus @default(PENDING)
+  hubspotError     String?           // Last error message from HubSpot API
+  syncAttempts     Int               @default(0)  // Number of sync attempts made
+
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@index([status])
+  @@index([hubspotStatus])
+  @@index([createdAt])
+}
+
+/// Singleton row (id = "singleton") stores HubSpot OAuth tokens and connection state
+model Settings {
+  id                  String    @id @default("singleton")
+
+  // HubSpot OAuth 2.0 tokens
+  hubspotAccessToken  String?
+  hubspotRefreshToken String?
+  hubspotTokenExpiry  DateTime?
+  hubspotConnected    Boolean   @default(false)
+
+  // Audit
+  lastSyncAt          DateTime?
+
+  updatedAt           DateTime  @updatedAt
+}

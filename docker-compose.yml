@@ -1,0 +1,62 @@
+version: '3.9'
+
+services:
+  # ─── PostgreSQL database ────────────────────────────────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    container_name: leadportal_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: leadportal
+      POSTGRES_USER: leadportal
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Expose locally for database tools (Prisma Studio, TablePlus, etc.)
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U leadportal -d leadportal']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ─── Lead Distribution Portal (Next.js + Socket.IO) ────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+    container_name: leadportal_app
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: '0.0.0.0'
+
+      # Database — references the postgres service by hostname
+      DATABASE_URL: postgresql://leadportal:${POSTGRES_PASSWORD}@postgres:5432/leadportal
+
+      # Auth
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+
+      # HubSpot OAuth
+      HUBSPOT_CLIENT_ID: ${HUBSPOT_CLIENT_ID:-}
+      HUBSPOT_CLIENT_SECRET: ${HUBSPOT_CLIENT_SECRET:-}
+      HUBSPOT_REDIRECT_URI: ${HUBSPOT_REDIRECT_URI:-http://localhost:3000/api/hubspot/callback}
+      HUBSPOT_ACCESS_TOKEN: ${HUBSPOT_ACCESS_TOKEN:-}
+
+      # Public URL (same as the build arg — needed at runtime for OAuth redirects)
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+
+volumes:
+  postgres_data:
+    driver: local
