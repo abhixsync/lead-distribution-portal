@@ -15,14 +15,15 @@ export async function GET() {
     const settings = await prisma.settings.findUnique({ where: { id: 'singleton' } })
 
     // Determine effective connection status
+    const isMock = process.env.HUBSPOT_MOCK === 'true'
     const hasStaticToken = Boolean(process.env.HUBSPOT_ACCESS_TOKEN)
     const hasStoredToken = Boolean(settings?.hubspotAccessToken)
-    const hasToken = hasStaticToken || hasStoredToken
+    const hasToken = isMock || hasStaticToken || hasStoredToken
 
     let tokenExpired = false
     let connectionStatus: HubSpotConnectionStatus = 'disconnected'
 
-    if (hasStaticToken) {
+    if (isMock || hasStaticToken) {
       connectionStatus = 'connected'
     } else if (hasStoredToken && settings?.hubspotConnected) {
       if (settings.hubspotTokenExpiry && settings.hubspotTokenExpiry < new Date()) {
