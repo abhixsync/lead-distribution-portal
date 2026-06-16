@@ -1,22 +1,51 @@
 'use client'
 
+import { useState } from 'react'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Button } from '@/components/ui/button'
 import { LeadStatusBadge, HubSpotStatusBadge } from './StatusBadge'
+import { toast } from '@/components/ui/use-toast'
 import { formatDate } from '@/lib/utils'
 import { BUDGET_RANGE_LABELS } from '@/types'
 import type { Lead } from '@prisma/client'
-import { InboxIcon } from 'lucide-react'
+import { InboxIcon, RefreshCw } from 'lucide-react'
 
 interface LeadsTableProps {
   leads: Lead[]
   loading: boolean
   error: string | null
+  /** Called after a successful retry so the parent can refetch immediately. */
+  onAfterRetry?: () => void
 }
 
-export function LeadsTable({ leads, loading, error }: LeadsTableProps) {
+export function LeadsTable({ leads, loading, error, onAfterRetry }: LeadsTableProps) {
+  const [retryingId, setRetryingId] = useState<string | null>(null)
+
+  async function handleRetry(leadId: string) {
+    setRetryingId(leadId)
+    try {
+      const res = await fetch('/api/hubspot/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leadId }),
+      })
+      if (!res.ok) throw new Error(`Retry failed: ${res.status}`)
+      toast({ title: 'Retry queued', description: 'Re-syncing this lead — status will update shortly.' })
+      onAfterRetry?.()
+    } catch (err) {
+      toast({
+        title: 'Retry failed',
+        description: err instanceof Error ? err.message : 'Could not trigger a retry.',
+        variant: 'destructive',
+      })
+    } finally {
+      setRetryingId(null)
+    }
+  }
+
   if (error) {
     return (
       <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
@@ -37,20 +66,21 @@ export function LeadsTable({ leads, loading, error }: LeadsTableProps) {
             <TableHead className="w-40 font-semibold text-gray-600">Created</TableHead>
             <TableHead className="w-28 font-semibold text-gray-600">Status</TableHead>
             <TableHead className="w-32 font-semibold text-gray-600">HubSpot</TableHead>
+            <TableHead className="w-24 font-semibold text-gray-600">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {loading ? (
             Array.from({ length: 5 }).map((_, i) => (
               <TableRow key={i}>
-                {Array.from({ length: 7 }).map((_, j) => (
+                {Array.from({ length: 8 }).map((_, j) => (
                   <TableCell key={j}><Skeleton className="h-4 w-full" /></TableCell>
                 ))}
               </TableRow>
             ))
           ) : leads.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={7}>
+              <TableCell colSpan={8}>
                 <div className="flex flex-col items-center justify-center py-14 text-center">
                   <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-gray-100">
                     <InboxIcon className="h-6 w-6 text-gray-400" />
@@ -90,6 +120,24 @@ export function LeadsTable({ leads, loading, error }: LeadsTableProps) {
                     >
                       {lead.hubspotError}
                     </p>
+                  )}
+                </TableCell>
+                <TableCell>
+                  {lead.status === 'FAILED' ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-1.5 text-xs"
+                      disabled={retryingId === lead.id}
+                      onClick={() => handleRetry(lead.id)}
+                    >
+                      <RefreshCw
+                        className={`h-3.5 w-3.5 ${retryingId === lead.id ? 'animate-spin' : ''}`}
+                      />
+                      {retryingId === lead.id ? 'Retrying' : 'Retry'}
+                    </Button>
+                  ) : (
+                    <span className="text-xs text-gray-300">—</span>
                   )}
                 </TableCell>
               </TableRow>

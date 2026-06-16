@@ -2,10 +2,37 @@ import { NextResponse, after } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { LeadFormSchema } from '@/lib/validations/lead'
 import { syncLeadToHubSpot } from '@/lib/hubspot/sync'
+import { rateLimit } from '@/lib/rate-limit'
 import { Prisma } from '@prisma/client'
+
+// Public submissions are throttled per client IP to deter spam/abuse.
+const LEADS_RATE_LIMIT = 10 // requests
+const LEADS_RATE_WINDOW_MS = 60_000 // per minute
+
+/** Best-effort client IP from proxy headers (Vercel sets x-forwarded-for). */
+function clientIp(request: Request): string {
+  const fwd = request.headers.get('x-forwarded-for')
+  if (fwd) return fwd.split(',')[0].trim()
+  return request.headers.get('x-real-ip')?.trim() || 'unknown'
+}
 
 export async function POST(request: Request) {
   try {
+    // Rate-limit the public endpoint. Disabled under test so the integration
+    // suite isn't throttled; the limiter has its own unit tests.
+    if (process.env.NODE_ENV !== 'test') {
+      const { allowed, retryAfterSeconds } = rateLimit(`leads:${clientIp(request)}`, {
+        limit: LEADS_RATE_LIMIT,
+        windowMs: LEADS_RATE_WINDOW_MS,
+      })
+      if (!allowed) {
+        return NextResponse.json(
+          { error: 'Too many requests. Please try again shortly.' },
+          { status: 429, headers: { 'Retry-After': String(retryAfterSeconds) } }
+        )
+      }
+    }
+
     const body = await request.json()
 
     const validation = LeadFormSchema.safeParse(body)

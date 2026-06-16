@@ -4,9 +4,10 @@ import { getSyncableLeadIds, syncLeadToHubSpot } from '@/lib/hubspot/sync'
 /**
  * POST /api/hubspot/sync
  *
- * Manually triggers a sync for all leads that still need it (PENDING, FAILED,
- * or orphaned in PROCESSING). Useful for re-syncing after fixing a HubSpot
- * configuration issue.
+ * Triggers HubSpot sync. Two modes, selected by the request body:
+ *   - { leadId: "..." }  → re-sync that ONE lead (used by the per-row Retry button)
+ *   - {} / no body       → sync ALL syncable leads (PENDING, FAILED, or orphaned
+ *                          in PROCESSING) — the "Sync all" action
  *
  * Responds immediately with the number of leads queued, then runs the syncs via
  * `after()` so the request doesn't block on the (potentially slow) HubSpot
@@ -18,9 +19,11 @@ import { getSyncableLeadIds, syncLeadToHubSpot } from '@/lib/hubspot/sync'
  * Response:
  *   { triggered: number, message: string }
  */
-export async function POST() {
+export async function POST(request: Request) {
   try {
-    const ids = await getSyncableLeadIds()
+    const leadId = await readLeadId(request)
+
+    const ids = leadId ? [leadId] : await getSyncableLeadIds()
 
     after(async () => {
       await Promise.allSettled(ids.map((id) => syncLeadToHubSpot(id)))
@@ -28,13 +31,28 @@ export async function POST() {
 
     return NextResponse.json({
       triggered: ids.length,
-      message:
-        ids.length > 0
-          ? `Triggered sync for ${ids.length} lead(s). The dashboard will update shortly.`
-          : 'No leads require syncing.',
+      message: buildMessage(leadId, ids.length),
     })
   } catch (err) {
     console.error('[API] POST /api/hubspot/sync error:', err)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
+}
+
+/** Parse an optional `leadId` from the JSON body; tolerate an empty/absent body. */
+async function readLeadId(request: Request): Promise<string | null> {
+  try {
+    const body = await request.json()
+    const id = body?.leadId
+    return typeof id === 'string' && id.length > 0 ? id : null
+  } catch {
+    return null // no/invalid body → "sync all" mode
+  }
+}
+
+function buildMessage(leadId: string | null, count: number): string {
+  if (leadId) return 'Retrying sync for the selected lead. The dashboard will update shortly.'
+  return count > 0
+    ? `Triggered sync for ${count} lead(s). The dashboard will update shortly.`
+    : 'No leads require syncing.'
 }
