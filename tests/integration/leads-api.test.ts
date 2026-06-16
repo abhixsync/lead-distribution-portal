@@ -1,6 +1,8 @@
 /**
  * Integration tests for POST /api/leads and GET /api/leads route handlers.
  * Prisma is mocked to avoid needing a real database.
+ *
+ * @jest-environment node
  */
 
 jest.mock('@/lib/prisma', () => ({
@@ -18,17 +20,12 @@ jest.mock('@/lib/hubspot/sync', () => ({
   syncLeadToHubSpot: jest.fn().mockResolvedValue(undefined),
 }))
 
-jest.mock('@/lib/socket', () => ({
-  emitLeadNew: jest.fn(),
-  emitLeadUpdated: jest.fn(),
-  emitStatsUpdated: jest.fn(),
-}))
-
-jest.mock('@/lib/stats', () => ({
-  getStats: jest.fn().mockResolvedValue({
-    total: 1, synced: 0, failed: 0, pending: 1, processing: 0, pipeline: 5000,
-  }),
-}))
+// `after()` only runs inside a real request scope; stub it so the handler can
+// schedule background work without throwing in the test environment.
+jest.mock('next/server', () => {
+  const actual = jest.requireActual('next/server')
+  return { ...actual, after: jest.fn() }
+})
 
 import { POST, GET } from '@/app/api/leads/route'
 import { prisma } from '@/lib/prisma'

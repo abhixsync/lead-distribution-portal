@@ -4,6 +4,10 @@ A production-quality full-stack lead capture and CRM synchronization system.
 
 ## Architecture
 
+Deployed serverless (Vercel). The dashboard stays current by polling the REST
+API; HubSpot sync runs in the background via `after()` with a Vercel Cron job as
+a durable recovery net.
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Browser / Client                          │
@@ -11,19 +15,20 @@ A production-quality full-stack lead capture and CRM synchronization system.
 │  │  Public Lead Form   │  │  Admin Dashboard (/dashboard)│  │
 │  │       (/)           │  │  Stats + Live Table + HubSpot│  │
 │  └──────────┬──────────┘  └──────────────┬──────────────┘  │
-│             │ POST /api/leads             │ Socket.IO        │
+│             │ POST /api/leads     polls   │ GET /api/leads   │
+│             │                     (~5s)   │     /api/stats   │
 └─────────────┼─────────────────────────────┼─────────────────┘
               │                             │
 ┌─────────────▼─────────────────────────────▼─────────────────┐
-│              Custom Next.js Server (server.ts)               │
-│                 HTTP Server + Socket.IO                      │
+│              Next.js App Router (serverless)                  │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │  Next.js App Router + API Routes                    │    │
-│  │  ├── POST /api/leads  (public)                      │    │
-│  │  ├── GET  /api/leads  (admin)                       │    │
-│  │  ├── GET  /api/stats  (admin)                       │    │
-│  │  ├── POST /api/auth/login                           │    │
-│  │  └── /api/hubspot/*   (OAuth + sync)               │    │
+│  │  API Routes                                          │    │
+│  │  ├── POST /api/leads  (public) ── after() ─┐        │    │
+│  │  ├── GET  /api/leads  (admin)              │        │    │
+│  │  ├── GET  /api/stats  (admin)              ▼        │    │
+│  │  ├── POST /api/auth/login        syncLeadToHubSpot()│    │
+│  │  ├── GET  /api/cron/sync (cron) ──┘ (atomic claim)  │    │
+│  │  └── /api/hubspot/*   (OAuth + manual sync)         │    │
 │  └─────────────────────────────────────────────────────┘    │
 └──────────────────────────┬──────────────────────────────────┘
                            │
@@ -70,12 +75,15 @@ erDiagram
 
 | Decision | Rationale |
 |---|---|
-| Custom `server.ts` | Socket.IO requires a raw `http.Server`; Next.js built-in server doesn't expose one |
-| `global.socketIO` singleton | API routes (same Node process) emit real-time events without circular imports |
+| Polling (not WebSockets) | Serverless has no persistent process to host Socket.IO; the dashboard polls `/api/leads` + `/api/stats` every ~5s |
+| `after()` for inline sync | Returns 201 immediately, then runs the HubSpot sync in the background while the function stays alive |
+| Vercel Cron recovery job | `/api/cron/sync` re-syncs PENDING/FAILED and re-claims leads orphaned in PROCESSING — the durable safety net if `after()` is killed |
+| Atomic claim (`updateMany`) | Flips a lead to PROCESSING only if claimable; makes concurrent triggers (inline + cron + manual) idempotent — no duplicate syncs |
+| OAuth `state` parameter | Single-use value in an httpOnly cookie, verified on callback — prevents CSRF / auth-code injection |
+| Middleware fails closed | Missing `JWT_SECRET` denies all protected requests rather than verifying against a fallback secret |
 | Prisma `globalThis` cache | Prevents connection-pool exhaustion from Next.js hot-reload |
 | `jose` for JWT | Next.js middleware runs on Edge Runtime — no Node.js `crypto` module available |
 | Zod schema shared client+server | Single validation rule source, no duplication |
-| Fire-and-forget HubSpot sync | POST `/api/leads` returns 201 immediately; sync runs in background |
 | Exponential backoff (3 retries) | Handles transient HubSpot API failures gracefully |
 
 ---
@@ -107,6 +115,7 @@ Edit `.env` with your values:
 DATABASE_URL=postgresql://postgres:password@localhost:5432/leadportal
 ADMIN_PASSWORD=your-admin-password
 JWT_SECRET=at-least-32-chars-random-string
+CRON_SECRET=random-string-protecting-the-cron-endpoint
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 
 # HubSpot — fill in after creating a developer app (see below)
@@ -172,11 +181,12 @@ App is now running at **http://localhost:3000**
 ### OAuth Flow
 
 ```
-Dashboard → POST /api/hubspot/connect → returns authUrl
+Dashboard → POST /api/hubspot/connect → generates state (httpOnly cookie) → returns authUrl
 Browser redirects to HubSpot OAuth
 User grants access
-HubSpot redirects to GET /api/hubspot/callback?code=...
-Server exchanges code for tokens → stored in Settings DB row
+HubSpot redirects to GET /api/hubspot/callback?code=...&state=...
+Server verifies state against the cookie (CSRF guard), then exchanges code for tokens
+Tokens stored in Settings DB row
 Redirect to /dashboard?hubspot_connected=true
 ```
 
@@ -242,7 +252,8 @@ Query params: `?status=PENDING|PROCESSING|SYNCED|FAILED`, `?limit=100`, `?offset
 Returns `{ authUrl: "https://app.hubspot.com/oauth/authorize?..." }`
 
 #### `GET /api/hubspot/callback`
-Handles OAuth redirect from HubSpot. Exchanges code for tokens.
+Handles OAuth redirect from HubSpot. Verifies the `state` param against the
+httpOnly cookie set by `/connect` (CSRF guard), then exchanges code for tokens.
 
 #### `GET /api/hubspot/status`
 ```json
@@ -260,7 +271,25 @@ Handles OAuth redirect from HubSpot. Exchanges code for tokens.
 Tests token validity and verifies `annual_budget` property exists.
 
 #### `POST /api/hubspot/sync`
-Manually triggers sync for all `PENDING` and `FAILED` leads.
+Manually triggers sync for all leads needing it (`PENDING`, `FAILED`, or
+orphaned `PROCESSING`). Responds immediately with `{ triggered }`; the syncs run
+in the background and the dashboard reflects them on its next poll.
+
+---
+
+### Cron Endpoint (CRON_SECRET required)
+
+#### `GET /api/cron/sync`
+
+Durable recovery job triggered by Vercel Cron (see `vercel.json`). Re-syncs every
+lead that still needs it — including leads stuck in `PROCESSING` because their
+inline `after()` sync was killed mid-flight. Authenticated via
+`Authorization: Bearer <CRON_SECRET>` (Vercel sends this automatically). Each
+sync re-claims atomically, so overlapping runs are safe.
+
+> **Self-hosting note:** outside Vercel, nothing triggers this automatically —
+> schedule an external cron (or container sidecar) to `GET /api/cron/sync` with
+> the bearer secret.
 
 ---
 
@@ -326,14 +355,15 @@ docker compose logs -f app
 
 4. The app runs migrations automatically on startup via:
    ```
-   npx prisma migrate deploy && npx tsx server.ts
+   npx prisma migrate deploy && node server.js
    ```
+   (`server.js` is Next.js's generated standalone server.)
 
 ### Services
 
 | Service | Port | Description |
 |---|---|---|
-| `app` | 3000 | Next.js + Socket.IO |
+| `app` | 3000 | Next.js (standalone) |
 | `postgres` | 5432 | PostgreSQL 17 |
 
 ### Stopping
@@ -377,30 +407,29 @@ npm run test:coverage
 
 ```
 z1tech-assessment/
-├── server.ts                    # Custom HTTP + Socket.IO entry point
+├── vercel.json                  # Vercel Cron schedule for /api/cron/sync
 ├── prisma/
 │   ├── schema.prisma            # Lead + Settings models
 │   └── migrations/              # SQL migration files
 ├── src/
-│   ├── middleware.ts            # Edge JWT auth guard
-│   ├── types/                   # Shared TypeScript types + Socket.IO event map
+│   ├── middleware.ts            # Edge JWT auth guard (fails closed)
+│   ├── types/                   # Shared TypeScript types
 │   ├── lib/
 │   │   ├── prisma.ts            # PrismaClient singleton
-│   │   ├── socket.ts            # Server-side emit helpers
 │   │   ├── stats.ts             # Pipeline calculator
 │   │   ├── auth/jwt.ts          # signJWT / verifyJWT (jose)
 │   │   ├── validations/         # Zod schemas (shared client+server)
-│   │   └── hubspot/             # OAuth, contacts, companies, sync
+│   │   └── hubspot/             # OAuth, contacts, companies, sync (atomic claim)
 │   ├── app/
 │   │   ├── page.tsx             # Public lead form
 │   │   ├── dashboard/           # Admin dashboard pages
-│   │   └── api/                 # All API route handlers
+│   │   └── api/                 # All API route handlers (incl. cron/sync)
 │   ├── components/
 │   │   ├── ui/                  # shadcn/ui primitives
 │   │   ├── lead-form/           # Public form component
 │   │   ├── auth/                # Login form
 │   │   └── dashboard/           # Stats, table, HubSpot widget
-│   └── hooks/                   # useSocket, useLeads, useStats, useHubSpotStatus
+│   └── hooks/                   # useLeads, useStats, useHubSpotStatus (polling)
 ├── tests/                       # Unit, integration, component tests
 ├── Dockerfile                   # Multi-stage production build
 └── docker-compose.yml           # App + PostgreSQL services
@@ -408,22 +437,31 @@ z1tech-assessment/
 
 ---
 
-## Real-Time Updates
+## Live Updates & Durable Sync
 
-Socket.IO events flow:
+The dashboard polls `/api/leads` and `/api/stats` every ~5 seconds, so widgets
+stay current without a page refresh (no WebSocket — serverless has no persistent
+process to host one).
+
+Sync lifecycle:
 
 ```
 Lead submitted → POST /api/leads
-  → lead created in DB
-  → emit 'lead:new' → Dashboard prepends row
-  → async syncLeadToHubSpot() fires
+  → lead created in DB (status: PENDING), 201 returned immediately
+  → after() schedules syncLeadToHubSpot() in the background
 
-syncLeadToHubSpot():
-  → emit 'lead:updated' (status: PROCESSING)
+syncLeadToHubSpot(leadId):
+  → ATOMIC CLAIM: updateMany flips PENDING/FAILED/stale-PROCESSING → PROCESSING
+      (claim affects 0 rows → another worker owns it → return; this is the
+       idempotency guard that makes inline + cron + manual triggers safe)
   → attempt HubSpot contact + company creation
-  → on success: emit 'lead:updated' (status: SYNCED) + 'stats:updated'
-  → on failure: retry with backoff (1s, 2s)
-  → after 3 failures: emit 'lead:updated' (status: FAILED) + 'stats:updated'
-```
+  → on success: status SYNCED, store HubSpot IDs, stamp Settings.lastSyncAt
+  → on failure: retry with exponential backoff (1s, 2s)
+  → after 3 failures: status FAILED, store the error message
 
-All dashboard widgets update in real time without page refresh.
+Recovery (durable safety net):
+  → Vercel Cron hits GET /api/cron/sync every minute
+  → re-syncs PENDING/FAILED and re-claims leads orphaned in PROCESSING
+     (e.g. a serverless function killed mid-sync) — guarantees leads
+     eventually reach HubSpot even if the inline after() didn't finish
+```

@@ -22,7 +22,7 @@ services:
       retries: 10
       start_period: 10s
 
-  # ─── Lead Distribution Portal (Next.js + Socket.IO) ────────────────────────
+  # ─── Lead Distribution Portal (Next.js) ────────────────────────────────────
   app:
     build:
       context: .

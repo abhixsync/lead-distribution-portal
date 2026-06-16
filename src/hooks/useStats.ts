@@ -1,35 +1,33 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import type { StatsData } from '@/types'
-import { useSocket } from './useSocket'
 
 interface UseStatsReturn {
   stats: StatsData | null
   loading: boolean
   error: string | null
+  refetch: () => Promise<void>
 }
+
+const POLL_INTERVAL_MS = 5_000
 
 /**
  * Manages aggregate lead statistics for the dashboard analytics cards.
- *
- * - Fetches stats on mount via GET /api/stats
- * - Updates in real-time on 'stats:updated' socket events
+ * Fetches on mount, then re-fetches every POLL_INTERVAL_MS to stay live.
  */
 export function useStats(): UseStatsReturn {
   const [stats, setStats] = useState<StatsData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const { socket } = useSocket()
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const fetchStats = useCallback(async () => {
     try {
-      setLoading(true)
       setError(null)
       const response = await fetch('/api/stats')
       if (!response.ok) throw new Error(`Failed to fetch stats: ${response.status}`)
-      const data = await response.json()
-      setStats(data)
+      setStats(await response.json())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load stats')
     } finally {
@@ -39,21 +37,11 @@ export function useStats(): UseStatsReturn {
 
   useEffect(() => {
     fetchStats()
+    pollRef.current = setInterval(fetchStats, POLL_INTERVAL_MS)
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+    }
   }, [fetchStats])
 
-  // Real-time stats updates
-  useEffect(() => {
-    if (!socket) return
-
-    function onStatsUpdated(data: StatsData) {
-      setStats(data)
-    }
-
-    socket.on('stats:updated', onStatsUpdated)
-    return () => {
-      socket.off('stats:updated', onStatsUpdated)
-    }
-  }, [socket])
-
-  return { stats, loading, error }
+  return { stats, loading, error, refetch: fetchStats }
 }

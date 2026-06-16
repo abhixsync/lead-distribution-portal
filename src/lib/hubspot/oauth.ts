@@ -4,6 +4,9 @@ import type { HubSpotTokenResponse } from './types'
 const HUBSPOT_AUTH_URL = 'https://app.hubspot.com/oauth/authorize'
 const HUBSPOT_TOKEN_URL = 'https://api.hubapi.com/oauth/v1/token'
 
+/** Name of the short-lived cookie that holds the OAuth CSRF state value. */
+export const OAUTH_STATE_COOKIE = 'hubspot_oauth_state'
+
 /** Required HubSpot OAuth scopes for CRM contact + company management */
 const REQUIRED_SCOPES = [
   'crm.objects.contacts.write',
@@ -16,19 +19,25 @@ const REQUIRED_SCOPES = [
 /**
  * Builds the HubSpot OAuth 2.0 authorization URL.
  * The user is redirected here to grant CRM access.
+ *
+ * @param state An unguessable, single-use value echoed back by HubSpot on the
+ *   callback. The caller must persist it (we use an httpOnly cookie) and verify
+ *   it on the callback to prevent CSRF / authorization-code injection.
  */
-export function buildAuthUrl(): string {
+export function buildAuthUrl(state: string): string {
   const clientId = process.env.HUBSPOT_CLIENT_ID
   const redirectUri = process.env.HUBSPOT_REDIRECT_URI
 
   if (!clientId) throw new Error('HUBSPOT_CLIENT_ID is not configured')
   if (!redirectUri) throw new Error('HUBSPOT_REDIRECT_URI is not configured')
+  if (!state) throw new Error('OAuth state is required')
 
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
     scope: REQUIRED_SCOPES,
     response_type: 'code',
+    state,
   })
 
   return `${HUBSPOT_AUTH_URL}?${params.toString()}`

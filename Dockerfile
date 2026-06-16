@@ -45,22 +45,14 @@ RUN apk add --no-cache libc6-compat openssl
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 
-# Copy the standalone Next.js output
+# Copy the standalone Next.js output (includes a generated server.js)
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 
-# Copy server.ts and related files for the custom server
-COPY --from=builder --chown=nextjs:nodejs /app/server.ts ./server.ts
-COPY --from=builder --chown=nextjs:nodejs /app/src/types ./src/types
-
-# Copy Prisma files for migrations at startup
+# Copy Prisma files + client for migrations at startup
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 COPY --from=deps --chown=nextjs:nodejs /app/node_modules ./node_modules
-
-# Copy package.json for tsx to find the project root
-COPY --from=builder --chown=nextjs:nodejs /app/package.json ./package.json
-COPY --from=builder --chown=nextjs:nodejs /app/tsconfig.json ./tsconfig.json
 
 USER nextjs
 
@@ -68,5 +60,7 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-# Run migrations then start the app
-CMD ["sh", "-c", "npx prisma migrate deploy && npx tsx server.ts"]
+# Run migrations then start the standalone Next.js server.
+# NOTE: the durable recovery job (/api/cron/sync) is NOT triggered automatically
+# outside Vercel — schedule an external cron to hit it if self-hosting.
+CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
