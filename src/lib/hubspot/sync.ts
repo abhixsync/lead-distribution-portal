@@ -1,11 +1,17 @@
 import { prisma } from '@/lib/prisma'
-import { emitLeadUpdated, emitStatsUpdated } from '@/lib/socket'
-import { getStats } from '@/lib/stats'
 import { createOrUpdateContact } from './contacts'
 import { createOrUpdateCompany } from './companies'
 
 const MAX_ATTEMPTS = 3
 const BASE_DELAY_MS = 1_000
+
+/**
+ * A lead left in PROCESSING longer than this is considered orphaned — its
+ * worker crashed or timed out mid-sync (common on serverless). The recovery
+ * job re-claims it. Must be comfortably longer than a worst-case sync run
+ * (retries + backoff + per-call timeouts).
+ */
+const STALE_PROCESSING_MS = 5 * 60 * 1000
 
 /** Returns a promise that resolves after `ms` milliseconds */
 function sleep(ms: number): Promise<void> {
@@ -15,38 +21,53 @@ function sleep(ms: number): Promise<void> {
 /**
  * Orchestrates the full HubSpot CRM sync for a single lead.
  *
- * Sync flow:
- * 1. Mark lead as PROCESSING → emit lead:updated
- * 2. Try to create/update Contact in HubSpot
- * 3. Try to create/update Company and associate with Contact
- * 4. On success: mark SYNCED, store HubSpot IDs → emit lead:updated + stats:updated
- * 5. On failure: exponential backoff, retry up to MAX_ATTEMPTS times
- * 6. After exhausting retries: mark FAILED, store error → emit updates
+ * Idempotency: the function begins by ATOMICALLY claiming the lead — flipping it
+ * to PROCESSING only if it is currently claimable (PENDING, FAILED, or a stale
+ * PROCESSING left behind by a dead worker). If the claim affects zero rows,
+ * another worker already owns it (or it's already SYNCED) and we return without
+ * doing anything. This makes it safe to trigger the same lead from multiple
+ * places concurrently — e.g. the immediate post-create `after()` and the cron
+ * recovery job, or a double-clicked manual sync.
  *
- * Exponential backoff delays:
- *   Attempt 1 → immediate
- *   Attempt 2 → wait 1000ms
- *   Attempt 3 → wait 2000ms
- *
- * Called as fire-and-forget from POST /api/leads to keep the HTTP response fast.
+ * Sync flow (after a successful claim):
+ * 1. Try to create/update Contact in HubSpot
+ * 2. Try to create/update Company and associate it with the Contact
+ * 3. On success: mark SYNCED, store HubSpot IDs, stamp Settings.lastSyncAt
+ * 4. On failure: exponential backoff, retry up to MAX_ATTEMPTS times
+ * 5. After exhausting retries: mark FAILED, store the error
  */
 export async function syncLeadToHubSpot(leadId: string): Promise<void> {
-  const lead = await prisma.lead.findUnique({ where: { id: leadId } })
-  if (!lead) {
-    console.warn(`[HubSpot Sync] Lead ${leadId} not found`)
-    return
-  }
+  const staleThreshold = new Date(Date.now() - STALE_PROCESSING_MS)
 
-  // Mark as PROCESSING immediately so the dashboard updates in real time
-  const processing = await prisma.lead.update({
-    where: { id: leadId },
+  // ── Atomic claim ───────────────────────────────────────────────────────────
+  const claim = await prisma.lead.updateMany({
+    where: {
+      id: leadId,
+      OR: [
+        { status: { in: ['PENDING', 'FAILED'] } },
+        // Recover a lead orphaned mid-sync by a crashed/timed-out worker.
+        { status: 'PROCESSING', updatedAt: { lt: staleThreshold } },
+      ],
+    },
     data: {
       status: 'PROCESSING',
       hubspotStatus: 'PENDING',
       hubspotError: null,
+      updatedAt: new Date(),
     },
   })
-  emitLeadUpdated(processing)
+
+  if (claim.count === 0) {
+    // Already SYNCED, or actively owned by another worker. Nothing to do.
+    console.log(`[HubSpot Sync] Lead ${leadId} not claimable — skipping`)
+    return
+  }
+
+  const lead = await prisma.lead.findUnique({ where: { id: leadId } })
+  if (!lead) {
+    console.warn(`[HubSpot Sync] Lead ${leadId} not found after claim`)
+    return
+  }
 
   let lastError: Error | null = null
 
@@ -61,7 +82,7 @@ export async function syncLeadToHubSpot(leadId: string): Promise<void> {
       const companyId = await createOrUpdateCompany(lead.companyName, contactId)
 
       // Step 3: Mark success in our DB
-      const synced = await prisma.lead.update({
+      await prisma.lead.update({
         where: { id: leadId },
         data: {
           status: 'SYNCED',
@@ -80,9 +101,6 @@ export async function syncLeadToHubSpot(leadId: string): Promise<void> {
         create: { id: 'singleton', lastSyncAt: new Date() },
         update: { lastSyncAt: new Date() },
       })
-
-      emitLeadUpdated(synced)
-      emitStatsUpdated(await getStats())
 
       console.log(`[HubSpot Sync] Lead ${leadId} synced successfully (attempt ${attempt})`)
       return // Done!
@@ -104,7 +122,7 @@ export async function syncLeadToHubSpot(leadId: string): Promise<void> {
   }
 
   // All attempts exhausted — mark as FAILED
-  const failed = await prisma.lead.update({
+  await prisma.lead.update({
     where: { id: leadId },
     data: {
       status: 'FAILED',
@@ -115,30 +133,29 @@ export async function syncLeadToHubSpot(leadId: string): Promise<void> {
     },
   })
 
-  emitLeadUpdated(failed)
-  emitStatsUpdated(await getStats())
-
   console.error(`[HubSpot Sync] Lead ${leadId} failed after ${MAX_ATTEMPTS} attempts`)
 }
 
 /**
- * Manually retries sync for all leads in PENDING or FAILED status.
- * Used by the POST /api/hubspot/sync endpoint (manual sync button on dashboard).
+ * Returns the IDs of all leads that should be (re)synced:
+ *   - PENDING — never attempted
+ *   - FAILED  — exhausted retries, eligible for a manual/scheduled retry
+ *   - PROCESSING but stale — orphaned by a dead worker
+ *
+ * Callers decide how to run the syncs (awaited in cron, or via `after()` for a
+ * manual trigger). Each `syncLeadToHubSpot` call re-claims atomically, so it's
+ * safe even if two recovery runs overlap.
  */
-export async function syncPendingLeads(): Promise<{ triggered: number }> {
+export async function getSyncableLeadIds(): Promise<string[]> {
+  const staleThreshold = new Date(Date.now() - STALE_PROCESSING_MS)
   const leads = await prisma.lead.findMany({
     where: {
-      status: { in: ['PENDING', 'FAILED'] },
+      OR: [
+        { status: { in: ['PENDING', 'FAILED'] } },
+        { status: 'PROCESSING', updatedAt: { lt: staleThreshold } },
+      ],
     },
     select: { id: true },
   })
-
-  // Fire all syncs concurrently (each one handles its own error/retry logic)
-  for (const lead of leads) {
-    syncLeadToHubSpot(lead.id).catch((err) =>
-      console.error(`[HubSpot Sync] Error syncing lead ${lead.id}:`, err)
-    )
-  }
-
-  return { triggered: leads.length }
+  return leads.map((l) => l.id)
 }

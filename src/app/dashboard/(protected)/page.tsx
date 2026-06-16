@@ -7,10 +7,8 @@ import { LeadsTable } from '@/components/dashboard/LeadsTable'
 import { HubSpotWidget } from '@/components/dashboard/HubSpotWidget'
 import { useLeads } from '@/hooks/useLeads'
 import { useStats } from '@/hooks/useStats'
-import { useSocket } from '@/hooks/useSocket'
 import { toast } from '@/components/ui/use-toast'
 
-/** Handles OAuth redirect query params — must be inside Suspense (uses useSearchParams) */
 function OAuthToast() {
   const searchParams = useSearchParams()
   useEffect(() => {
@@ -30,16 +28,13 @@ function OAuthToast() {
 export default function DashboardPage() {
   const { leads, loading: leadsLoading, error: leadsError } = useLeads()
   const { stats, loading: statsLoading } = useStats()
-  const { connected } = useSocket()
 
   return (
     <div className="space-y-6">
-      {/* Handles ?hubspot_connected / ?hubspot_error params after OAuth redirect */}
       <Suspense fallback={null}>
         <OAuthToast />
       </Suspense>
 
-      {/* Page header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-gray-900">Lead Dashboard</h1>
@@ -47,18 +42,15 @@ export default function DashboardPage() {
             Monitor leads and HubSpot sync status in real time
           </p>
         </div>
+        {/* Dashboard auto-refreshes via polling every few seconds */}
         <div className="flex items-center gap-2 rounded-full border bg-white px-3 py-1.5 text-xs shadow-sm">
-          <span className={`h-2 w-2 rounded-full ${connected ? 'bg-emerald-400 live-dot' : 'bg-gray-300'}`} />
-          <span className={connected ? 'font-medium text-emerald-600' : 'text-gray-400'}>
-            {connected ? 'Live' : 'Connecting…'}
-          </span>
+          <span className="h-2 w-2 rounded-full bg-emerald-400 live-dot" />
+          <span className="font-medium text-emerald-600">Live</span>
         </div>
       </div>
 
-      {/* Stats */}
       <StatsCards stats={stats} loading={statsLoading} />
 
-      {/* Main content */}
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-4">
         <div className="lg:col-span-1">
           <HubSpotWidget />

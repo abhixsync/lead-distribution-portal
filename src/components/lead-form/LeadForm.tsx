@@ -80,16 +80,17 @@ export function LeadForm() {
 
       {/* Name row */}
       <div className="grid grid-cols-2 gap-3">
-        <Field label="First Name" error={errors.firstName?.message}>
+        <Field htmlFor="firstName" label="First Name" error={errors.firstName?.message}>
           <Input id="firstName" placeholder="Jane" aria-invalid={!!errors.firstName} {...register('firstName')} />
         </Field>
-        <Field label="Last Name" error={errors.lastName?.message}>
+        <Field htmlFor="lastName" label="Last Name" error={errors.lastName?.message}>
           <Input id="lastName" placeholder="Smith" aria-invalid={!!errors.lastName} {...register('lastName')} />
         </Field>
       </div>
 
       {/* Email */}
       <Field
+        htmlFor="email"
         label="Corporate Email"
         error={errors.email?.message}
         hint={!errors.email ? 'Personal email providers are not accepted.' : undefined}
@@ -104,12 +105,12 @@ export function LeadForm() {
       </Field>
 
       {/* Company */}
-      <Field label="Company Name" error={errors.companyName?.message}>
+      <Field htmlFor="companyName" label="Company Name" error={errors.companyName?.message}>
         <Input id="companyName" placeholder="Acme Corporation" aria-invalid={!!errors.companyName} {...register('companyName')} />
       </Field>
 
       {/* Budget */}
-      <Field label="Estimated Annual Budget" error={errors.budgetRange?.message}>
+      <Field htmlFor="budgetRange" label="Estimated Annual Budget" error={errors.budgetRange?.message}>
         <Select onValueChange={(v) => setValue('budgetRange', v as LeadFormValues['budgetRange'], { shouldValidate: true })}>
           <SelectTrigger id="budgetRange" aria-invalid={!!errors.budgetRange}>
             <SelectValue placeholder="Select budget range" />
@@ -137,8 +138,9 @@ export function LeadForm() {
 
 /* ── Small helper ─────────────────────────────────────────────────── */
 function Field({
-  label, children, error, hint,
+  htmlFor, label, children, error, hint,
 }: {
+  htmlFor: string
   label: string
   children: React.ReactNode
   error?: string
@@ -146,7 +148,7 @@ function Field({
 }) {
   return (
     <div className="space-y-1.5">
-      <Label className="text-sm font-medium text-gray-700">
+      <Label htmlFor={htmlFor} className="text-sm font-medium text-gray-700">
         {label} <span className="text-red-500">*</span>
       </Label>
       {children}

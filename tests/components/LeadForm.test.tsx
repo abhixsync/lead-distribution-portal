@@ -49,8 +49,9 @@ describe('LeadForm', () => {
     await user.type(screen.getByLabelText(/company name/i), 'Acme')
     await user.click(screen.getByRole('button', { name: /get in touch/i }))
 
+    // Zod's blocked-domain refinement should surface its specific message.
     await waitFor(() => {
-      expect(screen.getByText(/corporate email/i)).toBeInTheDocument()
+      expect(screen.getByText(/use a corporate email address/i)).toBeInTheDocument()
     })
   })
 
@@ -69,18 +70,22 @@ describe('LeadForm', () => {
     await user.type(screen.getByLabelText(/corporate email/i), 'jane@acmecorp.com')
     await user.type(screen.getByLabelText(/company name/i), 'Acme Corp')
 
-    // Open the select and choose a budget option
-    // (Using a simplified check since Radix Select requires portal)
+    // Budget is required — select an option so client-side validation passes.
+    await user.click(screen.getByRole('combobox'))
+    await user.click(await screen.findByRole('option', { name: /under \$10k/i }))
+
     await user.click(screen.getByRole('button', { name: /get in touch/i }))
 
-    // The form submission happens; success is shown only when all fields are valid
-    // For this test we check fetch was called
+    // Valid submission posts to the API…
     await waitFor(() => {
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/leads',
         expect.objectContaining({ method: 'POST' })
       )
     })
+
+    // …and the success state is rendered after the 201 response.
+    expect(await screen.findByText(/you're all set/i)).toBeInTheDocument()
   })
 
   it('shows error banner on 409 duplicate email', async () => {

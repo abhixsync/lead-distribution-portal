@@ -2,9 +2,26 @@ import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { jwtVerify } from 'jose'
 
-function getSecret(): Uint8Array {
-  const secret = process.env.JWT_SECRET ?? 'fallback-secret-for-build'
+/**
+ * Returns the signing secret, or null if JWT_SECRET is not configured.
+ * We intentionally do NOT fall back to a hardcoded secret — a missing
+ * secret must fail CLOSED (deny access) rather than verify tokens against
+ * a publicly-known value.
+ */
+function getSecret(): Uint8Array | null {
+  const secret = process.env.JWT_SECRET
+  if (!secret) return null
   return new TextEncoder().encode(secret)
+}
+
+/** Build a deny response: 401 for API routes, redirect to login for pages. */
+function deny(request: NextRequest, clearCookie = false): NextResponse {
+  const { pathname } = request.nextUrl
+  const res = pathname.startsWith('/api/')
+    ? NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    : NextResponse.redirect(new URL('/dashboard/login', request.url))
+  if (clearCookie) res.cookies.delete('admin-token')
+  return res
 }
 
 export async function middleware(request: NextRequest) {
@@ -20,27 +37,24 @@ export async function middleware(request: NextRequest) {
   if (pathname === '/api/leads' && requestMethod === 'POST') return NextResponse.next()
 
   // ── Protected routes ───────────────────────────────────────────────────────
+  // Fail closed if the server is misconfigured — never verify against a fallback.
+  const secret = getSecret()
+  if (!secret) {
+    console.error('[Middleware] JWT_SECRET is not set — denying all protected requests')
+    return deny(request)
+  }
+
   const token = request.cookies.get('admin-token')?.value
 
   if (!token) {
-    if (pathname.startsWith('/api/')) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-    return NextResponse.redirect(new URL('/dashboard/login', request.url))
+    return deny(request)
   }
 
   try {
-    await jwtVerify(token, getSecret(), { algorithms: ['HS256'] })
+    await jwtVerify(token, secret, { algorithms: ['HS256'] })
     return NextResponse.next()
   } catch {
-    if (pathname.startsWith('/api/')) {
-      const res = NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-      res.cookies.delete('admin-token')
-      return res
-    }
-    const res = NextResponse.redirect(new URL('/dashboard/login', request.url))
-    res.cookies.delete('admin-token')
-    return res
+    return deny(request, true)
   }
 }
 

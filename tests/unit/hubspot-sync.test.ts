@@ -1,6 +1,6 @@
 /**
  * Unit tests for the HubSpot sync service.
- * Tests retry logic, exponential backoff, status transitions, and socket emissions.
+ * Tests the atomic claim, retry logic, exponential backoff, and status transitions.
  */
 
 // Mock Prisma before importing the module under test
@@ -9,6 +9,7 @@ jest.mock('@/lib/prisma', () => ({
     lead: {
       findUnique: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
     settings: {
       upsert: jest.fn(),
@@ -24,29 +25,10 @@ jest.mock('@/lib/hubspot/companies', () => ({
   createOrUpdateCompany: jest.fn(),
 }))
 
-// Mock socket emitters
-jest.mock('@/lib/socket', () => ({
-  emitLeadUpdated: jest.fn(),
-  emitStatsUpdated: jest.fn(),
-}))
-
-// Mock stats
-jest.mock('@/lib/stats', () => ({
-  getStats: jest.fn().mockResolvedValue({
-    total: 1,
-    synced: 1,
-    failed: 0,
-    pending: 0,
-    processing: 0,
-    pipeline: 5000,
-  }),
-}))
-
 import { syncLeadToHubSpot } from '@/lib/hubspot/sync'
 import { prisma } from '@/lib/prisma'
 import { createOrUpdateContact } from '@/lib/hubspot/contacts'
 import { createOrUpdateCompany } from '@/lib/hubspot/companies'
-import { emitLeadUpdated, emitStatsUpdated } from '@/lib/socket'
 
 const mockLead = {
   id: 'test-lead-id',
@@ -71,6 +53,8 @@ jest.useFakeTimers()
 describe('syncLeadToHubSpot', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // Claim succeeds by default (one row affected)
+    ;(prisma.lead.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
     ;(prisma.lead.findUnique as jest.Mock).mockResolvedValue(mockLead)
     ;(prisma.lead.update as jest.Mock).mockImplementation(({ data }) =>
       Promise.resolve({ ...mockLead, ...data })
@@ -78,7 +62,7 @@ describe('syncLeadToHubSpot', () => {
     ;(prisma.settings.upsert as jest.Mock).mockResolvedValue({})
   })
 
-  it('marks lead as PROCESSING on start', async () => {
+  it('atomically claims the lead as PROCESSING before syncing', async () => {
     ;(createOrUpdateContact as jest.Mock).mockResolvedValue('contact-123')
     ;(createOrUpdateCompany as jest.Mock).mockResolvedValue('company-123')
 
@@ -86,9 +70,20 @@ describe('syncLeadToHubSpot', () => {
     await jest.runAllTimersAsync()
     await syncPromise
 
-    // First update call should set status to PROCESSING
-    const firstUpdate = (prisma.lead.update as jest.Mock).mock.calls[0][0]
-    expect(firstUpdate.data.status).toBe('PROCESSING')
+    expect(prisma.lead.updateMany).toHaveBeenCalledTimes(1)
+    const claim = (prisma.lead.updateMany as jest.Mock).mock.calls[0][0]
+    expect(claim.where.id).toBe('test-lead-id')
+    expect(claim.data.status).toBe('PROCESSING')
+  })
+
+  it('skips work when the lead cannot be claimed (already owned/synced)', async () => {
+    ;(prisma.lead.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+    await syncLeadToHubSpot('test-lead-id')
+
+    expect(prisma.lead.findUnique).not.toHaveBeenCalled()
+    expect(createOrUpdateContact).not.toHaveBeenCalled()
+    expect(prisma.lead.update).not.toHaveBeenCalled()
   })
 
   it('marks lead as SYNCED on success', async () => {
@@ -104,17 +99,6 @@ describe('syncLeadToHubSpot', () => {
     expect(finalUpdate.data.hubspotStatus).toBe('SYNCED')
     expect(finalUpdate.data.hubspotContactId).toBe('contact-123')
     expect(finalUpdate.data.hubspotCompanyId).toBe('company-123')
-  })
-
-  it('emits lead:updated and stats:updated on success', async () => {
-    ;(createOrUpdateContact as jest.Mock).mockResolvedValue('contact-123')
-    ;(createOrUpdateCompany as jest.Mock).mockResolvedValue('company-123')
-
-    await syncLeadToHubSpot('test-lead-id')
-    await jest.runAllTimersAsync()
-
-    expect(emitLeadUpdated).toHaveBeenCalled()
-    expect(emitStatsUpdated).toHaveBeenCalled()
   })
 
   it('retries on failure and succeeds on 2nd attempt', async () => {
@@ -170,7 +154,7 @@ describe('syncLeadToHubSpot', () => {
     expect(finalUpdate.data.hubspotError).toBe('Final error')
   })
 
-  it('does nothing if the lead is not found', async () => {
+  it('does nothing if the lead is not found after claiming', async () => {
     ;(prisma.lead.findUnique as jest.Mock).mockResolvedValue(null)
 
     await syncLeadToHubSpot('nonexistent-id')

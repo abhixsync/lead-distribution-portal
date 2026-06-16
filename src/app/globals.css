@@ -45,7 +45,7 @@
   animation: pulse-dot 2s ease-in-out infinite;
 }
 
-/* Smooth row highlight when a lead row is updated via Socket.IO */
+/* Smooth row highlight when a lead row is updated on poll */
 @keyframes row-flash {
   0%   { background-color: hsl(221.2 83.2% 95%); }
   100% { background-color: transparent; }
