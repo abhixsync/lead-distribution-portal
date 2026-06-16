@@ -9,6 +9,7 @@ jest.mock('@/lib/prisma', () => ({
   prisma: {
     lead: {
       groupBy: jest.fn(),
+      count: jest.fn(),
     },
   },
 }))
@@ -17,6 +18,7 @@ import { getStats } from '@/lib/stats'
 import { prisma } from '@/lib/prisma'
 
 const groupBy = prisma.lead.groupBy as unknown as jest.Mock
+const count = prisma.lead.count as unknown as jest.Mock
 
 /** groupBy is called 3×, in order: status, hubspotStatus, budgetRange. */
 function mockGroupBy(opts: {
@@ -37,7 +39,10 @@ function mockGroupBy(opts: {
 }
 
 describe('getStats', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    count.mockResolvedValue(0)
+  })
 
   it('aggregates counts and pipeline value from grouped rows', async () => {
     mockGroupBy({
@@ -45,6 +50,7 @@ describe('getStats', () => {
       hubspot: { SYNCED: 4, FAILED: 3, PENDING: 3 },
       budget: { UNDER_10K: 2, BETWEEN_10K_50K: 3, GREATER_50K: 5 },
     })
+    count.mockResolvedValue(2) // leads with syncAttempts > 1
 
     const stats = await getStats()
 
@@ -53,6 +59,7 @@ describe('getStats', () => {
     expect(stats.processing).toBe(1)
     expect(stats.synced).toBe(4)
     expect(stats.failed).toBe(3)
+    expect(stats.retried).toBe(2)
     // 2*5_000 + 3*30_000 + 5*75_000
     expect(stats.pipeline).toBe(10_000 + 90_000 + 375_000)
   })
@@ -68,6 +75,7 @@ describe('getStats', () => {
       failed: 0,
       pending: 0,
       processing: 0,
+      retried: 0,
       pipeline: 0,
     })
   })

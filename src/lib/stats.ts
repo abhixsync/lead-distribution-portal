@@ -16,10 +16,11 @@ import type { LeadStatus, HubSpotSyncStatus, BudgetRange } from '@prisma/client'
  *   GREATER_50K     → $75,000
  */
 export async function getStats(): Promise<StatsData> {
-  const [byStatus, byHubspot, byBudget] = await Promise.all([
+  const [byStatus, byHubspot, byBudget, retried] = await Promise.all([
     prisma.lead.groupBy({ by: ['status'], _count: { _all: true } }),
     prisma.lead.groupBy({ by: ['hubspotStatus'], _count: { _all: true } }),
     prisma.lead.groupBy({ by: ['budgetRange'], _count: { _all: true } }),
+    prisma.lead.count({ where: { syncAttempts: { gt: 1 } } }),
   ])
 
   const statusCount = (s: LeadStatus) =>
@@ -39,6 +40,7 @@ export async function getStats(): Promise<StatsData> {
     failed: hubspotCount('FAILED'),
     pending: statusCount('PENDING'),
     processing: statusCount('PROCESSING'),
+    retried,
     pipeline,
   }
 }

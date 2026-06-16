@@ -1,4 +1,4 @@
-import { hubspotClient } from './client'
+import { hubspotClient, isAxios404 } from './client'
 import type { HubSpotSearchResponse, HubSpotCreateResponse } from './types'
 import { BUDGET_RANGE_TO_HUBSPOT } from './types'
 import type { Lead } from '@prisma/client'
@@ -70,10 +70,13 @@ async function findContactByEmail(email: string): Promise<string | null> {
     if (response.data.total > 0 && response.data.results.length > 0) {
       return response.data.results[0].id
     }
+    // A successful search with no matches genuinely means "no such contact".
     return null
-  } catch {
-    // If search fails, fall through to create — HubSpot will throw a duplicate error
-    // which we can catch and handle upstream
-    return null
+  } catch (err) {
+    // A FAILED search (network error, 5xx, auth) is NOT the same as "not found".
+    // Swallowing it here would make the caller create a duplicate contact. Let it
+    // propagate so the sync retries instead of silently duplicating.
+    if (isAxios404(err)) return null
+    throw err
   }
 }

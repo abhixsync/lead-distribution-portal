@@ -4,7 +4,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { formatCurrency } from '@/lib/utils'
 import type { StatsData } from '@/types'
-import { Users, CheckCircle2, XCircle, TrendingUp } from 'lucide-react'
+import { Users, CheckCircle2, XCircle, TrendingUp, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface StatsCardsProps {
@@ -51,7 +51,7 @@ function StatCard({ title, value, description, icon, loading, accent, valueColor
 
 export function StatsCards({ stats, loading }: StatsCardsProps) {
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
       <StatCard
         title="Total Leads"
         value={stats?.total ?? 0}
@@ -77,6 +77,15 @@ export function StatsCards({ stats, loading }: StatsCardsProps) {
         loading={loading}
         accent="bg-rose-50"
         valueColor={stats?.failed ? 'text-rose-600' : 'text-gray-900'}
+      />
+      <StatCard
+        title="Retried"
+        value={stats?.retried ?? 0}
+        description="Needed >1 sync attempt"
+        icon={<RefreshCw className="h-5 w-5 text-amber-600" />}
+        loading={loading}
+        accent="bg-amber-50"
+        valueColor={stats?.retried ? 'text-amber-600' : 'text-gray-900'}
       />
       <StatCard
         title="Est. Pipeline"

@@ -80,3 +80,64 @@ export function __resetRateLimit(): void {
   buckets.clear()
   lastSweep = 0
 }
+
+/**
+ * Rate-limit with a SHARED store when available, falling back to in-memory.
+ *
+ * If UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN are set, the count lives
+ * in Redis, so the limit is enforced globally across all serverless instances.
+ * Otherwise (or if Redis errors) it degrades to the per-instance in-memory
+ * limiter above — never failing the request just because the store is down.
+ *
+ * Async because the Redis call is over the network; callers must `await`.
+ */
+export async function enforceRateLimit(
+  key: string,
+  options: RateLimitOptions = {}
+): Promise<RateLimitResult> {
+  const url = process.env.UPSTASH_REDIS_REST_URL
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN
+  if (url && token) {
+    try {
+      return await upstashFixedWindow(url, token, key, options)
+    } catch {
+      // Redis unavailable — fall through to the in-memory limiter.
+    }
+  }
+  return rateLimit(key, options)
+}
+
+/** Fixed-window counter via the Upstash Redis REST pipeline API. */
+async function upstashFixedWindow(
+  url: string,
+  token: string,
+  key: string,
+  options: RateLimitOptions
+): Promise<RateLimitResult> {
+  const limit = options.limit ?? 10
+  const windowMs = options.windowMs ?? 60_000
+  const redisKey = `ratelimit:${key}`
+
+  const res = await fetch(`${url}/pipeline`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify([
+      ['INCR', redisKey],
+      ['PEXPIRE', redisKey, windowMs, 'NX'], // start the window only on first hit
+      ['PTTL', redisKey],
+    ]),
+  })
+  if (!res.ok) throw new Error(`Upstash error ${res.status}`)
+
+  const results = (await res.json()) as Array<{ result: number }>
+  const count = results[0].result
+  const pttl = results[2].result
+  const retryAfterSeconds = pttl > 0 ? Math.ceil(pttl / 1000) : Math.ceil(windowMs / 1000)
+
+  return {
+    allowed: count <= limit,
+    remaining: Math.max(0, limit - count),
+    resetAt: Date.now() + (pttl > 0 ? pttl : windowMs),
+    retryAfterSeconds,
+  }
+}

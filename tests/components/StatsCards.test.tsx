@@ -8,14 +8,15 @@ const mockStats: StatsData = {
   failed: 3,
   pending: 3,
   processing: 1,
+  retried: 4,
   pipeline: 245_000,
 }
 
 describe('StatsCards', () => {
   it('shows loading skeletons when loading', () => {
     const { container } = render(<StatsCards stats={null} loading={true} />)
-    // Skeletons render as animate-pulse divs
-    expect(container.querySelectorAll('.animate-pulse')).toHaveLength(4)
+    // One skeleton per stat card (Total, Synced, Failed, Retried, Pipeline).
+    expect(container.querySelectorAll('.animate-pulse')).toHaveLength(5)
   })
 
   it('displays total lead count', () => {

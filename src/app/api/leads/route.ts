@@ -2,7 +2,9 @@ import { NextResponse, after } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { LeadFormSchema } from '@/lib/validations/lead'
 import { syncLeadToHubSpot } from '@/lib/hubspot/sync'
-import { rateLimit } from '@/lib/rate-limit'
+import { sendNewLeadNotification } from '@/lib/notify'
+import { enforceRateLimit } from '@/lib/rate-limit'
+import { captureException } from '@/lib/logger'
 import { Prisma } from '@prisma/client'
 
 // Public submissions are throttled per client IP to deter spam/abuse.
@@ -21,7 +23,7 @@ export async function POST(request: Request) {
     // Rate-limit the public endpoint. Disabled under test so the integration
     // suite isn't throttled; the limiter has its own unit tests.
     if (process.env.NODE_ENV !== 'test') {
-      const { allowed, retryAfterSeconds } = rateLimit(`leads:${clientIp(request)}`, {
+      const { allowed, retryAfterSeconds } = await enforceRateLimit(`leads:${clientIp(request)}`, {
         limit: LEADS_RATE_LIMIT,
         windowMs: LEADS_RATE_WINDOW_MS,
       })
@@ -63,12 +65,15 @@ export async function POST(request: Request) {
     // recovery job (/api/cron/sync) will re-claim and finish it. The claim
     // inside syncLeadToHubSpot makes the overlap with cron safe.
     after(async () => {
+      // Notify first (fast/independent), then run the HubSpot sync. Notification
+      // failures are swallowed inside sendNewLeadNotification.
+      await sendNewLeadNotification(lead)
       await syncLeadToHubSpot(lead.id)
     })
 
     return NextResponse.json(lead, { status: 201 })
   } catch (err) {
-    console.error('[API] POST /api/leads error:', err)
+    captureException(err, { route: 'POST /api/leads' })
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
@@ -92,7 +97,7 @@ export async function GET(request: Request) {
 
     return NextResponse.json({ leads, total, limit, offset })
   } catch (err) {
-    console.error('[API] GET /api/leads error:', err)
+    captureException(err, { route: 'GET /api/leads' })
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

@@ -1,4 +1,4 @@
-import { hubspotClient } from './client'
+import { hubspotClient, isAxios404 } from './client'
 import type { HubSpotSearchResponse, HubSpotCreateResponse } from './types'
 
 /**
@@ -57,9 +57,13 @@ async function findCompanyByName(name: string): Promise<string | null> {
     if (response.data.total > 0 && response.data.results.length > 0) {
       return response.data.results[0].id
     }
+    // Successful search, no match → genuinely no such company.
     return null
-  } catch {
-    return null
+  } catch (err) {
+    // A failed search must not be mistaken for "not found" (that would create a
+    // duplicate company). Only a real 404 means absent; rethrow everything else.
+    if (isAxios404(err)) return null
+    throw err
   }
 }
 

@@ -1,8 +1,14 @@
 import axios, { type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { prisma } from '@/lib/prisma'
+import { decryptSecret } from '@/lib/crypto'
 import { refreshToken } from './oauth'
 
 const HUBSPOT_API_BASE = 'https://api.hubapi.com'
+
+/** True only for a genuine HubSpot 404 (object not found) — not a transient error. */
+export function isAxios404(err: unknown): boolean {
+  return axios.isAxiosError(err) && err.response?.status === 404
+}
 
 /** Time buffer (ms) before expiry to proactively refresh the token */
 const REFRESH_BUFFER_MS = 5 * 60 * 1000 // 5 minutes
@@ -27,15 +33,30 @@ export async function getAccessToken(): Promise<string> {
     throw new Error('HubSpot is not connected. Please complete OAuth setup from the dashboard.')
   }
 
-  // Proactively refresh if token will expire soon
+  // Proactively refresh if token will expire soon. Coalesce concurrent refreshes
+  // (single-flight): without this, several in-flight HubSpot calls could each
+  // trigger a refresh, and all but the last would be left holding a token that
+  // the newer refresh has already rotated/revoked.
   if (
     settings.hubspotTokenExpiry &&
     settings.hubspotTokenExpiry.getTime() - Date.now() < REFRESH_BUFFER_MS
   ) {
-    return await refreshToken()
+    return await refreshTokenSingleFlight()
   }
 
-  return settings.hubspotAccessToken
+  return decryptSecret(settings.hubspotAccessToken)
+}
+
+/** Module-scoped promise that de-duplicates overlapping token refreshes. */
+let refreshInFlight: Promise<string> | null = null
+
+function refreshTokenSingleFlight(): Promise<string> {
+  if (!refreshInFlight) {
+    refreshInFlight = refreshToken().finally(() => {
+      refreshInFlight = null
+    })
+  }
+  return refreshInFlight
 }
 
 /**

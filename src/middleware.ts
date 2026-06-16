@@ -59,5 +59,13 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/dashboard/:path*', '/api/leads', '/api/stats', '/api/hubspot/:path*'],
+  matcher: [
+    '/dashboard/:path*',
+    '/api/leads',
+    // Sub-routes like /api/leads/export must be protected. The public POST
+    // bypass in the handler above only matches the exact '/api/leads' path.
+    '/api/leads/:path+',
+    '/api/stats',
+    '/api/hubspot/:path*',
+  ],
 }

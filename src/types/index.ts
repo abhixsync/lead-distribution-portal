@@ -16,6 +16,8 @@ export interface StatsData {
   failed: number
   pending: number
   processing: number
+  /** Leads that needed more than one sync attempt (syncAttempts > 1) */
+  retried: number
   /** Estimated pipeline value in USD based on budget ranges */
   pipeline: number
 }

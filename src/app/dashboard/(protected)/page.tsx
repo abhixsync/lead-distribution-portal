@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { useLeads, type LeadStatusFilter } from '@/hooks/useLeads'
 import { useStats } from '@/hooks/useStats'
 import { toast } from '@/components/ui/use-toast'
-import { ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react'
+import { ChevronLeft, ChevronRight, RefreshCw, Download } from 'lucide-react'
 
 const PAGE_SIZE = 20
 
@@ -107,6 +107,9 @@ function DashboardContent() {
     }
   }
 
+  // CSV export mirrors the active status filter ("export what I see").
+  const exportUrl = `/api/leads/export${statusFilter !== 'ALL' ? `?status=${statusFilter}` : ''}`
+
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const rangeStart = total === 0 ? 0 : page * PAGE_SIZE + 1
   const rangeEnd = Math.min(total, page * PAGE_SIZE + leads.length)
@@ -121,6 +124,12 @@ function DashboardContent() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button asChild variant="outline" size="sm" className="h-8 gap-1.5">
+            <a href={exportUrl} download>
+              <Download className="h-3.5 w-3.5" />
+              Export CSV
+            </a>
+          </Button>
           <Button
             variant="outline"
             size="sm"

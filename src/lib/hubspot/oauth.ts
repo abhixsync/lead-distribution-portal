@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/prisma'
+import { encryptSecret, decryptSecret } from '@/lib/crypto'
 import type { HubSpotTokenResponse } from './types'
 
 const HUBSPOT_AUTH_URL = 'https://app.hubspot.com/oauth/authorize'
@@ -77,18 +78,22 @@ export async function exchangeCode(code: string): Promise<void> {
 
   const data = (await response.json()) as HubSpotTokenResponse
 
+  // Encrypt tokens at rest — never store HubSpot credentials in plaintext.
+  const encryptedAccess = encryptSecret(data.access_token)
+  const encryptedRefresh = encryptSecret(data.refresh_token)
+
   await prisma.settings.upsert({
     where: { id: 'singleton' },
     create: {
       id: 'singleton',
-      hubspotAccessToken: data.access_token,
-      hubspotRefreshToken: data.refresh_token,
+      hubspotAccessToken: encryptedAccess,
+      hubspotRefreshToken: encryptedRefresh,
       hubspotTokenExpiry: new Date(Date.now() + data.expires_in * 1000),
       hubspotConnected: true,
     },
     update: {
-      hubspotAccessToken: data.access_token,
-      hubspotRefreshToken: data.refresh_token,
+      hubspotAccessToken: encryptedAccess,
+      hubspotRefreshToken: encryptedRefresh,
       hubspotTokenExpiry: new Date(Date.now() + data.expires_in * 1000),
       hubspotConnected: true,
     },
@@ -118,7 +123,7 @@ export async function refreshToken(): Promise<string> {
     grant_type: 'refresh_token',
     client_id: clientId,
     client_secret: clientSecret,
-    refresh_token: settings.hubspotRefreshToken,
+    refresh_token: decryptSecret(settings.hubspotRefreshToken),
   })
 
   const response = await fetch(HUBSPOT_TOKEN_URL, {
@@ -142,8 +147,10 @@ export async function refreshToken(): Promise<string> {
   await prisma.settings.update({
     where: { id: 'singleton' },
     data: {
-      hubspotAccessToken: data.access_token,
-      hubspotRefreshToken: data.refresh_token ?? settings.hubspotRefreshToken,
+      hubspotAccessToken: encryptSecret(data.access_token),
+      hubspotRefreshToken: data.refresh_token
+        ? encryptSecret(data.refresh_token)
+        : settings.hubspotRefreshToken,
       hubspotTokenExpiry: new Date(Date.now() + data.expires_in * 1000),
       hubspotConnected: true,
     },
