@@ -1,7 +1,7 @@
 'use client'
 
-import { Suspense, useEffect, useState } from 'react'
-import { useSearchParams } from 'next/navigation'
+import { Suspense, useEffect, useState, useCallback } from 'react'
+import { useSearchParams, useRouter } from 'next/navigation'
 import { StatsCards } from '@/components/dashboard/StatsCards'
 import { LeadsTable } from '@/components/dashboard/LeadsTable'
 import { HubSpotWidget } from '@/components/dashboard/HubSpotWidget'
@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { useLeads, type LeadStatusFilter } from '@/hooks/useLeads'
 import { useStats } from '@/hooks/useStats'
 import { toast } from '@/components/ui/use-toast'
-import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react'
 
 const PAGE_SIZE = 20
 
@@ -21,8 +21,30 @@ const STATUS_FILTERS: { label: string; value: LeadStatusFilter }[] = [
   { label: 'Failed', value: 'FAILED' },
 ]
 
-function OAuthToast() {
+const VALID_FILTERS = new Set<string>(STATUS_FILTERS.map((f) => f.value))
+
+export default function DashboardPage() {
+  // useSearchParams() must sit inside a Suspense boundary.
+  return (
+    <Suspense fallback={null}>
+      <DashboardContent />
+    </Suspense>
+  )
+}
+
+function DashboardContent() {
+  const router = useRouter()
   const searchParams = useSearchParams()
+
+  // The URL is the source of truth for filter + page, so refresh / back-forward
+  // / shared links all restore the same view.
+  const statusParam = searchParams.get('status')
+  const statusFilter: LeadStatusFilter =
+    statusParam && VALID_FILTERS.has(statusParam) ? (statusParam as LeadStatusFilter) : 'ALL'
+  const pageParam = parseInt(searchParams.get('page') ?? '1', 10)
+  const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam - 1 : 0 // 0-based internally
+
+  // ── OAuth result toast (one-shot) ──────────────────────────────────────────
   useEffect(() => {
     const connected = searchParams.get('hubspot_connected')
     const error = searchParams.get('hubspot_error')
@@ -34,12 +56,6 @@ function OAuthToast() {
       window.history.replaceState({}, '', '/dashboard')
     }
   }, [searchParams])
-  return null
-}
-
-export default function DashboardPage() {
-  const [statusFilter, setStatusFilter] = useState<LeadStatusFilter>('ALL')
-  const [page, setPage] = useState(0)
 
   const { leads, total, loading: leadsLoading, error: leadsError, refetch } = useLeads({
     status: statusFilter,
@@ -48,9 +64,47 @@ export default function DashboardPage() {
   })
   const { stats, loading: statsLoading } = useStats()
 
+  // Write filter/page back to the URL (replace, so it doesn't spam history).
+  const setParams = useCallback(
+    (next: { status?: LeadStatusFilter; page?: number }) => {
+      const params = new URLSearchParams(searchParams.toString())
+      if (next.status !== undefined) {
+        if (next.status === 'ALL') params.delete('status')
+        else params.set('status', next.status)
+      }
+      if (next.page !== undefined) {
+        if (next.page <= 1) params.delete('page')
+        else params.set('page', String(next.page))
+      }
+      const qs = params.toString()
+      router.replace(qs ? `/dashboard?${qs}` : '/dashboard', { scroll: false })
+    },
+    [router, searchParams]
+  )
+
   function changeFilter(value: LeadStatusFilter) {
-    setStatusFilter(value)
-    setPage(0) // a new filter resets to the first page
+    setParams({ status: value, page: 1 }) // a new filter resets to the first page
+  }
+
+  // ── Sync all ───────────────────────────────────────────────────────────────
+  const [syncingAll, setSyncingAll] = useState(false)
+  async function handleSyncAll() {
+    setSyncingAll(true)
+    try {
+      const res = await fetch('/api/hubspot/sync', { method: 'POST' })
+      if (!res.ok) throw new Error(`Sync failed: ${res.status}`)
+      const data = await res.json()
+      toast({ title: 'Sync triggered', description: data.message })
+      refetch()
+    } catch (err) {
+      toast({
+        title: 'Sync failed',
+        description: err instanceof Error ? err.message : 'Could not trigger a sync.',
+        variant: 'destructive',
+      })
+    } finally {
+      setSyncingAll(false)
+    }
   }
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -59,10 +113,6 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <Suspense fallback={null}>
-        <OAuthToast />
-      </Suspense>
-
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-gray-900">Lead Dashboard</h1>
@@ -70,10 +120,22 @@ export default function DashboardPage() {
             Monitor leads and HubSpot sync status in real time
           </p>
         </div>
-        {/* Dashboard auto-refreshes via polling every few seconds */}
-        <div className="flex items-center gap-2 rounded-full border bg-white px-3 py-1.5 text-xs shadow-sm">
-          <span className="h-2 w-2 rounded-full bg-emerald-400 live-dot" />
-          <span className="font-medium text-emerald-600">Live</span>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5"
+            disabled={syncingAll}
+            onClick={handleSyncAll}
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${syncingAll ? 'animate-spin' : ''}`} />
+            {syncingAll ? 'Syncing…' : 'Sync all'}
+          </Button>
+          {/* Dashboard auto-refreshes via polling every few seconds */}
+          <div className="flex items-center gap-2 rounded-full border bg-white px-3 py-1.5 text-xs shadow-sm">
+            <span className="h-2 w-2 rounded-full bg-emerald-400 live-dot" />
+            <span className="font-medium text-emerald-600">Live</span>
+          </div>
         </div>
       </div>
 
@@ -129,7 +191,7 @@ export default function DashboardPage() {
                 size="sm"
                 className="h-8 gap-1 px-2"
                 disabled={page === 0}
-                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                onClick={() => setParams({ page })}
               >
                 <ChevronLeft className="h-4 w-4" />
                 Prev
@@ -139,7 +201,7 @@ export default function DashboardPage() {
                 size="sm"
                 className="h-8 gap-1 px-2"
                 disabled={page + 1 >= pageCount}
-                onClick={() => setPage((p) => p + 1)}
+                onClick={() => setParams({ page: page + 2 })}
               >
                 Next
                 <ChevronRight className="h-4 w-4" />
