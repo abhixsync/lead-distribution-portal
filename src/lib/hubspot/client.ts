@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { prisma } from '@/lib/prisma'
 import { refreshToken } from './oauth'
+import { createMockHubSpotClient } from './mock-client'
 
 const HUBSPOT_API_BASE = 'https://api.hubapi.com'
 
@@ -59,5 +60,18 @@ export function createHubSpotClient(): AxiosInstance {
   return client
 }
 
-// Export a shared instance; each call gets a fresh token via the interceptor
-export const hubspotClient = createHubSpotClient()
+/**
+ * Shared HubSpot client.
+ *
+ * When HUBSPOT_MOCK=true, this is an in-memory fake (see mock-client.ts) that
+ * needs no credentials — leads sync end-to-end against fake contact/company IDs.
+ * Otherwise it's the real axios instance; each call gets a fresh token via the
+ * request interceptor.
+ */
+export const hubspotClient: AxiosInstance =
+  process.env.HUBSPOT_MOCK === 'true'
+    ? (() => {
+        console.warn('[HubSpot] HUBSPOT_MOCK=true — using in-memory mock client (no real API calls)')
+        return createMockHubSpotClient()
+      })()
+    : createHubSpotClient()
